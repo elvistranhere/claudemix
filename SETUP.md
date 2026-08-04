@@ -89,7 +89,6 @@ const server = http.createServer((req, res) => {
     delete headers['transfer-encoding'];
     headers['content-length'] = String(body.length);
 
-    let upstream;
     if (toCliproxy) {
       let key;
       try { key = proxyKey(); } catch (err) {
@@ -101,34 +100,44 @@ const server = http.createServer((req, res) => {
       headers.host = `${CLIPROXY_HOST}:${CLIPROXY_PORT}`;
       headers.authorization = `Bearer ${key}`;
       delete headers['x-api-key'];
-      upstream = http.request({
-        host: CLIPROXY_HOST, port: CLIPROXY_PORT, path: req.url,
-        method: req.method, headers, agent: cliproxyAgent,
-      });
     } else {
       headers.host = ANTHROPIC_HOST;
-      upstream = https.request({
-        host: ANTHROPIC_HOST, port: 443, path: req.url,
-        method: req.method, headers, agent: anthropicAgent,
-      });
     }
+    const route = toCliproxy ? 'cliproxy' : 'anthropic';
 
-    upstream.setTimeout(0);
-    upstream.on('response', (up) => {
-      log(`${toCliproxy ? 'cliproxy' : 'anthropic'} ${req.method} ${req.url} model=${model ?? '-'} status=${up.statusCode}`);
-      res.writeHead(up.statusCode, up.headers);
-      up.pipe(res);
-    });
-    upstream.on('error', (err) => {
-      log(`ERROR ${toCliproxy ? 'cliproxy' : 'anthropic'} ${req.method} ${req.url} ${err.code || err.message}`);
-      if (!res.headersSent) {
-        res.writeHead(502, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: { type: 'claudemix_splitter', message: `upstream error: ${err.code || err.message}` } }));
-      } else {
-        res.destroy();
-      }
-    });
-    upstream.end(body);
+    // A pooled keep-alive socket can be closed server-side while idle; the next
+    // write then fails (ECONNRESET/EPIPE) before any response bytes arrive. The
+    // body is fully buffered, so one retry on a fresh socket is safe and
+    // invisible to the client.
+    const RETRYABLE = new Set(['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ECONNREFUSED']);
+    const send = (attempt) => {
+      const upstream = toCliproxy
+        ? http.request({ host: CLIPROXY_HOST, port: CLIPROXY_PORT, path: req.url, method: req.method, headers, agent: attempt === 1 ? cliproxyAgent : false })
+        : https.request({ host: ANTHROPIC_HOST, port: 443, path: req.url, method: req.method, headers, agent: attempt === 1 ? anthropicAgent : false });
+      upstream.setTimeout(0);
+      upstream.on('response', (up) => {
+        log(`${route} ${req.method} ${req.url} model=${model ?? '-'} status=${up.statusCode}${attempt > 1 ? ' (retry)' : ''}`);
+        res.writeHead(up.statusCode, up.headers);
+        up.pipe(res);
+      });
+      upstream.on('error', (err) => {
+        const code = err.code || err.message;
+        if (attempt === 1 && !res.headersSent && RETRYABLE.has(err.code)) {
+          log(`RETRY ${route} ${req.method} ${req.url} ${code}`);
+          send(2);
+          return;
+        }
+        log(`ERROR ${route} ${req.method} ${req.url} ${code}`);
+        if (!res.headersSent) {
+          res.writeHead(502, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { type: 'claudemix_splitter', message: `upstream error: ${code}` } }));
+        } else {
+          res.destroy();
+        }
+      });
+      upstream.end(body);
+    };
+    send(1);
   });
 });
 
@@ -158,6 +167,9 @@ Detect the user's shell (`$SHELL`). Append the block below to `~/.zshrc` (zsh) o
 # login, forwarded untouched by a local splitter (:8318); subagents whose agent
 # definition pins a gpt-* model are routed to CLIProxyAPI (:8317).
 # CLAUDE_CODE_SUBAGENT_MODEL must stay unset or it flattens per-agent routing.
+# ENABLE_TOOL_SEARCH=true is REQUIRED: behind any ANTHROPIC_BASE_URL gateway,
+# Claude Code silently disables tool-schema deferral and inlines every MCP
+# schema, which can add 100k+ tokens of boot context on tool-heavy machines.
 claudemix() {
   if ! curl -sf --max-time 1 -o /dev/null http://127.0.0.1:8318/api/hello 2>/dev/null; then
     nohup node "$HOME/.claudemix/claudemix-splitter.mjs" >/dev/null 2>&1 &!
@@ -165,6 +177,7 @@ claudemix() {
   fi
   env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u CLAUDE_CODE_SUBAGENT_MODEL \
     ANTHROPIC_BASE_URL="http://127.0.0.1:8318" \
+    ENABLE_TOOL_SEARCH=true \
     claude "$@"
 }
 ```
@@ -201,3 +214,4 @@ Never trust a model's claim about its own identity; subagents will happily hallu
 - 502 with "CLIProxyAPI key unavailable": config path wrong; set `CLAUDEMIX_CLIPROXY_CONF`.
 - Splitter port busy: a splitter is already running (duplicate spawns exit cleanly).
 - All subagents suddenly one model: `CLAUDE_CODE_SUBAGENT_MODEL` leaked into the environment; it must be unset.
+- Context meter pegged at boot, or instant "Prompt is too long" on a fresh session with no matching request in the splitter log: `ENABLE_TOOL_SEARCH=true` is missing from the environment, so Claude Code inlined every MCP tool schema (it disables tool-schema deferral behind any base-URL gateway). Verified impact on a tool-heavy machine: boot context 164k without the flag, 41k with it. Do NOT work around this with `CLAUDE_CODE_AUTO_COMPACT_WINDOW`; that clamps the client's effective context limit downward and turns the symptom into hard client-side failures.

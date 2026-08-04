@@ -66,7 +66,6 @@ const server = http.createServer((req, res) => {
     delete headers['transfer-encoding'];
     headers['content-length'] = String(body.length);
 
-    let upstream;
     if (toCliproxy) {
       let key;
       try { key = proxyKey(); } catch (err) {
@@ -78,34 +77,44 @@ const server = http.createServer((req, res) => {
       headers.host = `${CLIPROXY_HOST}:${CLIPROXY_PORT}`;
       headers.authorization = `Bearer ${key}`;
       delete headers['x-api-key'];
-      upstream = http.request({
-        host: CLIPROXY_HOST, port: CLIPROXY_PORT, path: req.url,
-        method: req.method, headers, agent: cliproxyAgent,
-      });
     } else {
       headers.host = ANTHROPIC_HOST;
-      upstream = https.request({
-        host: ANTHROPIC_HOST, port: 443, path: req.url,
-        method: req.method, headers, agent: anthropicAgent,
-      });
     }
+    const route = toCliproxy ? 'cliproxy' : 'anthropic';
 
-    upstream.setTimeout(0);
-    upstream.on('response', (up) => {
-      log(`${toCliproxy ? 'cliproxy' : 'anthropic'} ${req.method} ${req.url} model=${model ?? '-'} status=${up.statusCode}`);
-      res.writeHead(up.statusCode, up.headers);
-      up.pipe(res);
-    });
-    upstream.on('error', (err) => {
-      log(`ERROR ${toCliproxy ? 'cliproxy' : 'anthropic'} ${req.method} ${req.url} ${err.code || err.message}`);
-      if (!res.headersSent) {
-        res.writeHead(502, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: { type: 'claudemix_splitter', message: `upstream error: ${err.code || err.message}` } }));
-      } else {
-        res.destroy();
-      }
-    });
-    upstream.end(body);
+    // A pooled keep-alive socket can be closed server-side while idle; the next
+    // write then fails (ECONNRESET/EPIPE) before any response bytes arrive. The
+    // body is fully buffered, so one retry on a fresh socket is safe and
+    // invisible to the client.
+    const RETRYABLE = new Set(['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ECONNREFUSED']);
+    const send = (attempt) => {
+      const upstream = toCliproxy
+        ? http.request({ host: CLIPROXY_HOST, port: CLIPROXY_PORT, path: req.url, method: req.method, headers, agent: attempt === 1 ? cliproxyAgent : false })
+        : https.request({ host: ANTHROPIC_HOST, port: 443, path: req.url, method: req.method, headers, agent: attempt === 1 ? anthropicAgent : false });
+      upstream.setTimeout(0);
+      upstream.on('response', (up) => {
+        log(`${route} ${req.method} ${req.url} model=${model ?? '-'} status=${up.statusCode}${attempt > 1 ? ' (retry)' : ''}`);
+        res.writeHead(up.statusCode, up.headers);
+        up.pipe(res);
+      });
+      upstream.on('error', (err) => {
+        const code = err.code || err.message;
+        if (attempt === 1 && !res.headersSent && RETRYABLE.has(err.code)) {
+          log(`RETRY ${route} ${req.method} ${req.url} ${code}`);
+          send(2);
+          return;
+        }
+        log(`ERROR ${route} ${req.method} ${req.url} ${code}`);
+        if (!res.headersSent) {
+          res.writeHead(502, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ error: { type: 'claudemix_splitter', message: `upstream error: ${code}` } }));
+        } else {
+          res.destroy();
+        }
+      });
+      upstream.end(body);
+    };
+    send(1);
   });
 });
 

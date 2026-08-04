@@ -37,16 +37,19 @@ claudemix --dangerously-skip-permissions
 
 Inside the session, delegate to GPT with the `sol` agent type (Agent tool `subagent_type: sol`, or `agentType: 'sol'` in Workflow scripts). The main model, and any subagent without a gpt model pinned, stays on Claude as normal.
 
-## The two gotchas that matter
+## The three gotchas that matter
 
 1. **Route subagents via agent definitions, not the inline model param.** A `model: gpt-...` line in `~/.claude/agents/sol.md` frontmatter works; passing the same string inline in an Agent tool call is silently rejected and falls back to a Claude model.
 2. **Verify with the log, never with the model's self-report.** Subagents will claim to be whatever the prompt implies. `~/.local/state/claudemix/splitter.log` records which upstream actually served every request.
+3. **Force tool search back on.** Behind any `ANTHROPIC_BASE_URL` gateway, Claude Code silently disables tool-schema deferral and inlines every MCP tool schema. On a tool-heavy machine that added over 100k tokens of boot context (measured: 164k vs 41k), which pegs the context meter from the first turn and can produce instant client-side "Prompt is too long" errors. The `claudemix` shell function sets `ENABLE_TOOL_SEARCH=true`, which restores deferral through the gateway. Do not reach for `CLAUDE_CODE_AUTO_COMPACT_WINDOW` instead; it clamps the effective limit downward and makes things worse.
 
 Also: leave `CLAUDE_CODE_SUBAGENT_MODEL` unset in these sessions, or every subagent gets flattened onto one model.
 
 ## Performance
 
 Measured against direct connections: overhead is within noise. The splitter keeps warm keep-alive TLS pools to both upstreams, responses stream straight through (time-to-first-token unaffected), request-side work is one JSON parse to read the model field. Roughly 40MB of resident memory while running; it starts on demand from the shell function.
+
+Reliability: idle keep-alive sockets that the upstream closed are retried once on a fresh connection (connection-level failures only, before any response bytes), so stale-pool resets never surface to the client as 502s.
 
 ## Security notes
 
