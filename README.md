@@ -135,22 +135,27 @@ printf 'hi' | env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
 
 That is how the `output_config.effort` default above was established. Note `timeout` is not present on stock macOS, so leave it out of probe scripts or the command silently never runs.
 
-### What tools survive the translation layer
+### What tools work in a lane
 
-Audited by having each lane test its own tool access. All four agreed:
+Audited by having each lane test its own tool access. All four agreed: Bash, Read, WebFetch, and WebSearch work; Glob and Grep are not present.
 
-| Tool | Status |
-| --- | --- |
-| Bash, Read, WebFetch, WebSearch | works |
-| Glob, Grep | **unavailable** |
+**The missing tools are not a claudemix effect.** Capturing the `tools` array Claude Code actually sends shows Glob and Grep absent from a plain session too, with the gateway and tool search both switched off. This Claude Code build does not ship them, so a lane is exactly as capable as the orchestrator driving it. The lane prompts point at Bash (`rg`, `find`) for discovery because that is how search works here generally, not to paper over a translation-layer gap.
 
-Web access working is what makes research fan-out worth delegating: a lane can search and read sources on the Codex budget instead of the Claude one. The missing Glob and Grep matter most for sweep-style work, so the generated lane prompts tell each lane to use Bash (`rg`, `find`) for discovery instead. If you brief a lane yourself, do the same, or hand it an explicit file list resolved on the Claude side.
+Web access working is the finding that matters: a lane can search and read sources on the Codex budget rather than the Claude one, which is what makes research fan-out worth delegating at all.
 
-Worth knowing when you read a lane's self-report: an earlier audit marked WebSearch "failed" on evidence that was actually an account rate-limit message, and marked Glob failed because the agent looked for it via ToolSearch. Distinguish a tool that is absent from one that was blocked by something environmental — a lane will confidently conflate them.
+The same capture answers the tool-search question quantitatively — `ENABLE_TOOL_SEARCH=true` yields **12 tools** in the request against **122** without it.
 
-### Known limitation: context windows
+Worth knowing when you read a lane's self-report: an earlier audit marked WebSearch "failed" on evidence that was actually an account rate-limit message. A lane will confidently report an environmental block as a tool failure, so check the evidence, not the verdict.
 
-Claude Code does not recognize `gpt-*` model ids, so it assumes a 200K context window for every lane and auto-compacts against that. The real windows are larger (spark is 256K, the 5.6 tier more), so long-context work is truncated earlier than it needs to be. Claude Code's own warning names the remedies — a `modelOverrides` settings entry, `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, or a `[1m]` model-name suffix — but `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is a single global value rather than a per-model map, so it cannot express four lanes with four different windows. Left unwired deliberately.
+### Context windows: leave the default alone
+
+Claude Code does not recognize `gpt-*` model ids, so it assumes a 200K window per lane and auto-compacts against that. The obvious fix is the `[1m]` model-name suffix Claude Code itself suggests, and it does work through this stack — Claude Code strips the suffix client-side, so the splitter sees a plain `gpt-5.6-terra` and the request routes normally.
+
+Do it anyway and you would probably regret it. The raw API window for the 5.6 tier is about 1.05M tokens, but these lanes run on a **Codex** credential, and the Codex surface caps the same models far lower — [reported at ~372K with a 95% effective multiplier](https://github.com/openai/codex/issues/32486), so roughly 353K usable. Telling Claude Code it has 1M would let a session grow past what the backend accepts and fail mid-task instead of compacting. The same report notes Codex sessions crossing **272K move into a higher-usage pricing band**, which on a personal Codex subscription is your bill, not a rounding error.
+
+So 200K is close to the right number for this path, not a shortfall to work around. Spark's 256K is the only lane meaningfully under-served, and being conservative there costs nothing.
+
+Sources: [Codex context metadata issue](https://github.com/openai/codex/issues/32486), [GPT-5.6 Sol specifications](https://gate.ai/blog/gpt-5-6-sol-openai-specs-pricing-api-access-use-cases), [GPT-5.6 limits guide](https://www.layer3labs.io/guides/gpt-5-6-limits)
 - The log rotates at 10MB.
 
 ## License
