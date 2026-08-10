@@ -80,8 +80,13 @@ EOF
 
 step "sol agent"
 SLUG="$(curl -s --max-time 3 "http://127.0.0.1:${PORT}/claudemix/status" | python3 -c 'import json,sys
+import re
 models = (json.load(sys.stdin).get("cliproxy") or {}).get("models") or []
-gpt = [m for m in models if m.startswith("gpt-")]
+def ver(m):
+    n = re.match(r"gpt-(\d+)\.(\d+)", m)
+    return (int(n.group(1)), int(n.group(2))) if n else (0, 0)
+gpt = [m for m in models if m.startswith("gpt-") and not re.search(r"image|mini", m)]
+gpt.sort(key=lambda m: (ver(m), m.endswith("-sol")), reverse=True)
 print(gpt[0] if gpt else "")' 2>/dev/null || true)"
 if [ -n "$SLUG" ]; then
   mkdir -p "$HOME/.claude/agents"
