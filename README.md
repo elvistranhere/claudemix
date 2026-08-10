@@ -117,10 +117,14 @@ Reliability: idle keep-alive sockets that the upstream closed are retried once o
 - `proxyKey()` parses the uncommented `api-keys:` block instead of grabbing the first `sk-*` string in the file. The stock brew config ships with five commented-out `sk-*` doc examples and placeholder keys, which the upstream regex happily matched, yielding 401s on a fresh install.
 - `count_tokens` on the gpt lane degrades to a local estimate when CLIProxyAPI does not implement it, instead of surfacing an API error inside the session.
 - `GET /claudemix/status` reports uptime, config, CLIProxyAPI reachability, and the model list it serves.
-- `install-launchd.sh` runs the splitter as a supervised launchd agent (starts at login, restarts on crash) instead of a one-shot nohup. It converges rather than restarting: a rerun that changes nothing leaves the running splitter alone, which matters because the session running the installer is proxying through that port. It also waits for `bootout` to finish before `bootstrap` (racing it returns `Bootstrap failed: 5: Input/output error`), hands the port over from any unmanaged splitter, and fails loudly if the launchd job is not the process actually holding the port. Without that last check the job can look loaded while supervising nothing, because the splitter exits 0 on `EADDRINUSE`.
-- `verify.sh` extends the echo round-trip with tool-use, strict-JSON, count_tokens, and lane-integrity checks, all verified against the splitter log rather than model self-report.
-- Agent lanes and the routing skill are generated from the served model list, so delegation is seamless instead of something you have to remember to configure.
-- Each generated lane pins a reasoning effort, so the cheap lanes stop paying for `xhigh` reasoning (see Model lanes above). `verify.sh` fails if a lane is missing one.
+- `install-launchd.sh` supervises the splitter with launchd (starts at login, restarts on crash) instead of a one-shot nohup, and **converges rather than restarts** — a rerun that changes nothing leaves the running splitter alone, which matters because the session running the installer is proxying through that port. Three failure modes it now handles: `bootout` is async so bootstrapping immediately after returns `Bootstrap failed: 5: Input/output error`; an unmanaged splitter already holding the port must be handed over; and the job can look loaded while supervising nothing, because the splitter exits 0 on `EADDRINUSE`.
+- `verify.sh` extends the echo round-trip with tool-use, strict-JSON, count_tokens, lane-integrity, and lane-effort checks, all asserted against the splitter log rather than model self-report.
+- Agent lanes and the routing skill are generated from the served model list, each pinning a reasoning effort (see Model lanes above), so delegation needs no configuration.
+- The log records reasoning effort per request and rotates at 10MB.
+
+## Field notes
+
+Things established by measurement here, kept because each one cost time to find and would otherwise be re-litigated.
 
 ### Verifying what actually goes on the wire
 
@@ -156,7 +160,12 @@ Do it anyway and you would probably regret it. The raw API window for the 5.6 ti
 So 200K is close to the right number for this path, not a shortfall to work around. Spark's 256K is the only lane meaningfully under-served, and being conservative there costs nothing.
 
 Sources: [Codex context metadata issue](https://github.com/openai/codex/issues/32486), [GPT-5.6 Sol specifications](https://gate.ai/blog/gpt-5-6-sol-openai-specs-pricing-api-access-use-cases), [GPT-5.6 limits guide](https://www.layer3labs.io/guides/gpt-5-6-limits)
-- The log rotates at 10MB.
+
+### Brief lanes with bounded input
+
+A lane that is told to "read what you need" will read until it overruns its window, and the task then dies with `Prompt is too long` rather than degrading — you lose the work and get no partial result. Four lanes given an open-ended review brief all died this way; the same review, scoped to three named files with "read nothing else", ran fine in 24k tokens.
+
+The constraint is on *input*, not on task length. Long multi-step builds are what the deep lane is for, and the generated prompts tell each lane to keep working until the done-criteria are met and to persist progress to disk so a long run does not depend on holding everything in context. What does not work is surveying a tree or piping an unbounded diff into the window. Name the files, or hand over the excerpt yourself, then let the lane run as long as the job needs.
 
 ## License
 

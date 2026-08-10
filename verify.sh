@@ -35,7 +35,10 @@ echo "$OUT" | grep -q "PASSTHROUGH-OK" && ok "T2 claude passthrough" || bad "T2 
 # T3: gpt route, verified via splitter log not self-report
 NONCE="mix-$(date +%s)"
 OUT="$(run_claude "--model $SLUG" "Reply with exactly: $NONCE")"
-if echo "$OUT" | grep -q "$NONCE" && tail -50 "$LOG" | grep "cliproxy" | grep -q "model=$SLUG status=200"; then
+# Match model and status without assuming they are adjacent: the log line grew an
+# effort= field between them, and asserting on adjacency passed for a while purely
+# on stale lines still inside the tail window.
+if echo "$OUT" | grep -q "$NONCE" && tail -50 "$LOG" | grep "cliproxy" | grep -q "model=$SLUG .*status=200"; then
   ok "T3 gpt route (log-verified)"
 else
   bad "T3 gpt route" "reply='$OUT'; check: grep cliproxy $LOG"
