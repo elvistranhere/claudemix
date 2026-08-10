@@ -60,13 +60,14 @@ fi
 # T7: every installed lane points at a model CLIProxyAPI actually serves.
 # A lane whose model disappeared still looks like a valid agent type and fails
 # only at delegation time, which is the worst place to find out.
-LANES=0; STALE=""
+LANES=0; STALE=""; NOEFFORT=""
 for f in "$HOME"/.claude/agents/*.md; do
   [ -f "$f" ] || continue
   M="$(sed -n 's/^model: *//p' "$f" | head -1)"
   case "$M" in
     gpt-*) LANES=$((LANES+1))
-           echo "$STATUS_JSON" | grep -q "\"$M\"" || STALE="$STALE $(basename "$f" .md)->$M" ;;
+           echo "$STATUS_JSON" | grep -q "\"$M\"" || STALE="$STALE $(basename "$f" .md)->$M"
+           grep -q '^effort: ' "$f" || NOEFFORT="$NOEFFORT $(basename "$f" .md)" ;;
   esac
 done
 if [ "$LANES" -eq 0 ]; then
@@ -75,6 +76,17 @@ elif [ -n "$STALE" ]; then
   bad "T7 lane integrity" "unserved:$STALE"
 else
   ok "T7 lane integrity ($LANES lanes)"
+fi
+
+# T8: every lane pins an effort. A lane without one inherits Claude Code's xhigh
+# default, which CLIProxyAPI forwards as reasoning.effort=xhigh — the cheap lanes
+# would then silently pay the most expensive reasoning tier.
+if [ "$LANES" -eq 0 ]; then
+  echo "SKIP  T8 lane effort (no gpt lanes installed)"
+elif [ -n "$NOEFFORT" ]; then
+  bad "T8 lane effort" "missing effort:$NOEFFORT (defaults to xhigh)"
+else
+  ok "T8 lane effort (all $LANES lanes pinned)"
 fi
 
 echo "RESULT: $PASS pass, $FAIL fail"

@@ -47,12 +47,14 @@ Inside the session, delegate to GPT with a lane agent type (Agent tool `subagent
 
 `install.sh` writes one agent lane per served model, so routing needs no configuration and no prompting. Claude Code picks a subagent by reading agent descriptions, so each lane's description states what it is good at and the orchestrator routes to it on its own.
 
-| Lane | Model | For |
-| --- | --- | --- |
-| `sol` | gpt-5.6-sol | The hardest delegated work: complex multi-file implementation, long agentic tool sessions, thorny debugging |
-| `terra` | gpt-5.6-terra | The default executor: routine implementation, refactors, tests, docs, at roughly half sol's cost |
-| `luna` | gpt-5.6-luna | Bulk mechanical work: sweeps, renames, formatting, many small transforms |
-| `spark` | gpt-5.3-codex-spark | Real-time short scope: single-file edits and quick reviews at 1,000+ tok/s |
+| Lane | Model | Effort | For |
+| --- | --- | --- | --- |
+| `sol` | gpt-5.6-sol | `xhigh` | The hardest delegated work: complex multi-file implementation, long agentic tool sessions, thorny debugging |
+| `terra` | gpt-5.6-terra | `medium` | The default executor: routine implementation, refactors, tests, docs, at roughly half sol's cost |
+| `luna` | gpt-5.6-luna | `low` | Bulk mechanical work: sweeps, renames, formatting, many small transforms |
+| `spark` | gpt-5.3-codex-spark | `low` | Real-time short scope: single-file edits and quick reviews at 1,000+ tok/s |
+
+Each lane pins a reasoning effort, and that is not cosmetic. Claude Code sends `output_config: {effort: "xhigh"}` by default on every request, including ones aimed at a model it does not recognize, and CLIProxyAPI's translator forwards that straight into `reasoning.effort`. A lane without an explicit effort therefore runs at the most expensive reasoning tier regardless of how cheap its model is — which made the bulk lane the most over-provisioned one in the set. `claudemix verify` fails if any lane is missing its effort.
 
 Lanes whose model stops being served are removed on the next install rather than left to fail at delegation time, and `claudemix verify` fails if any installed lane points at an unserved model.
 
@@ -96,6 +98,24 @@ Reliability: idle keep-alive sockets that the upstream closed are retried once o
 - `install-launchd.sh` runs the splitter as a supervised launchd agent (starts at login, restarts on crash) instead of a one-shot nohup. It converges rather than restarting: a rerun that changes nothing leaves the running splitter alone, which matters because the session running the installer is proxying through that port. It also waits for `bootout` to finish before `bootstrap` (racing it returns `Bootstrap failed: 5: Input/output error`), hands the port over from any unmanaged splitter, and fails loudly if the launchd job is not the process actually holding the port. Without that last check the job can look loaded while supervising nothing, because the splitter exits 0 on `EADDRINUSE`.
 - `verify.sh` extends the echo round-trip with tool-use, strict-JSON, count_tokens, and lane-integrity checks, all verified against the splitter log rather than model self-report.
 - Agent lanes and the routing skill are generated from the served model list, so delegation is seamless instead of something you have to remember to configure.
+- Each generated lane pins a reasoning effort, so the cheap lanes stop paying for `xhigh` reasoning (see Model lanes above). `verify.sh` fails if a lane is missing one.
+
+### Verifying what actually goes on the wire
+
+Claims about which fields reach the upstream are worth checking rather than trusting, and the splitter deliberately never logs headers or bodies. To capture a real request, point Claude Code at a throwaway HTTP server instead of the splitter and read the body it posts:
+
+```sh
+# minimal capture server on :8399 that logs the body and returns a canned reply
+node capture.mjs &
+printf 'hi' | env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
+  ANTHROPIC_BASE_URL=http://127.0.0.1:8399 claude -p --model gpt-5.6-terra
+```
+
+That is how the `output_config.effort` default above was established. Note `timeout` is not present on stock macOS, so leave it out of probe scripts or the command silently never runs.
+
+### Known limitation: context windows
+
+Claude Code does not recognize `gpt-*` model ids, so it assumes a 200K context window for every lane and auto-compacts against that. The real windows are larger (spark is 256K, the 5.6 tier more), so long-context work is truncated earlier than it needs to be. Claude Code's own warning names the remedies — a `modelOverrides` settings entry, `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, or a `[1m]` model-name suffix — but `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is a single global value rather than a per-model map, so it cannot express four lanes with four different windows. Left unwired deliberately.
 - The log rotates at 10MB.
 
 ## License

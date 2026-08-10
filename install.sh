@@ -93,17 +93,20 @@ try:
 except Exception:
     models = set()
 
+# effort rides frontmatter -> output_config.effort -> CLIProxyAPI reasoning.effort.
+# Without it every lane inherits Claude Code's xhigh default, so the cheap lanes
+# pay for the most expensive reasoning tier.
 lanes = [
-    ("sol", "gpt-5.6-sol",
+    ("sol", "gpt-5.6-sol", "xhigh",
      "Deep GPT executor lane for the hardest delegated work: complex multi-file implementation, long agentic tool sessions, thorny debugging execution. Works only inside a claudemix session.",
      "You are the deep executor lane for hard, well-briefed work."),
-    ("terra", "gpt-5.6-terra",
+    ("terra", "gpt-5.6-terra", "medium",
      "Default GPT executor lane for routine implementation, refactors, test-writing, and doc passes at low cost. Prefer over sol when the task is well-specified and of moderate difficulty. Works only inside a claudemix session.",
      "You are the default executor lane for well-specified routine work."),
-    ("luna", "gpt-5.6-luna",
+    ("luna", "gpt-5.6-luna", "low",
      "Fast cheap GPT lane for bulk mechanical work: sweeps, renames, formatting, high-volume small transforms. Not for multi-step judgment. Works only inside a claudemix session.",
      "You are the bulk lane. Each task you receive is small and mechanical; do exactly it."),
-    ("spark", "gpt-5.3-codex-spark",
+    ("spark", "gpt-5.3-codex-spark", "low",
      "Real-time GPT lane, 1000+ tokens per second with a small context: instant single-file edits and quick review passes with tiny scope. Not for long tasks. Works only inside a claudemix session.",
      "You are the real-time lane. Scope is tiny by design; if the task needs more than a few steps, say so and stop."),
 ]
@@ -111,12 +114,12 @@ lanes = [
 body = """Perform exactly the task briefed, verify your work against the stated done criteria, and return a terse summary with evidence, never a dump. Do not re-plan the wider job or spawn further orchestration."""
 
 agents_dir = os.path.expanduser("~/.claude/agents")
-for name, model, description, opener in lanes:
+for name, model, effort, description, opener in lanes:
     path = os.path.join(agents_dir, f"{name}.md")
     if model in models:
         with open(path, "w") as f:
-            f.write(f"---\nname: {name}\ndescription: {description}\nmodel: {model}\n---\n\n{opener} {body}\n")
-        print(f"lane {name} -> {model}")
+            f.write(f"---\nname: {name}\ndescription: {description}\nmodel: {model}\neffort: {effort}\n---\n\n{opener} {body}\n")
+        print(f"lane {name} -> {model} (effort {effort})")
     elif os.path.exists(path) and f"model: {model}" in open(path).read():
         os.remove(path)
         print(f"lane {name} removed ({model} no longer served)")

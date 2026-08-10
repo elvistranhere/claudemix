@@ -4,12 +4,22 @@ Research snapshot 2026-08-10. The installer turns the served subset of these int
 
 ## GPT side (via CLIProxyAPI / Codex subscription)
 
-| Model | Lane | Use for | Avoid for |
-|---|---|---|---|
-| gpt-5.6-sol | `sol` | The hardest autonomous work: complex multi-file coding, long agentic sessions with many tool calls, cybersecurity-grade analysis. Flagship; SOTA on BrowseComp (92.2%) and OSWorld 2.0, notably token-efficient for its tier. | High-volume trivial tasks (wasteful), real-time interactive loops |
-| gpt-5.6-terra | `terra` | The default executor: routine implementation, refactors, test-writing, doc passes. GPT-5.5-level competence at roughly half the cost. | Frontier-difficulty reasoning, very long horizons |
-| gpt-5.6-luna | `luna` | Bulk and speed: mechanical sweeps, formatting, simple transforms, high-volume small tasks. Near GPT-5.5 quality at a fraction of the cost, and the July 30 price cut made it 80% cheaper again. | Anything needing sustained multi-step judgment |
-| gpt-5.3-codex-spark | `spark` | Real-time short-scope work: instant single-file edits, quick reviews, tight feedback loops. 1,000+ tok/s on Cerebras. | Long tasks (256K context, pair-programmer mode, not an autonomous agent) |
+| Model | Lane | Effort | Use for | Avoid for |
+|---|---|---|---|---|
+| gpt-5.6-sol | `sol` | `xhigh` | The hardest autonomous work: complex multi-file coding, long agentic sessions with many tool calls, cybersecurity-grade analysis. Flagship; SOTA on BrowseComp (92.2%) and OSWorld 2.0, notably token-efficient for its tier. | High-volume trivial tasks (wasteful), real-time interactive loops |
+| gpt-5.6-terra | `terra` | `medium` | The default executor: routine implementation, refactors, test-writing, doc passes. GPT-5.5-level competence at roughly half the cost. | Frontier-difficulty reasoning, very long horizons |
+| gpt-5.6-luna | `luna` | `low` | Bulk and speed: mechanical sweeps, formatting, simple transforms, high-volume small tasks. Near GPT-5.5 quality at a fraction of the cost, and the July 30 price cut made it 80% cheaper again. | Anything needing sustained multi-step judgment |
+| gpt-5.3-codex-spark | `spark` | `low` | Real-time short-scope work: instant single-file edits, quick reviews, tight feedback loops. 1,000+ tok/s on Cerebras. | Long tasks (256K context, pair-programmer mode, not an autonomous agent) |
+
+### Why every lane pins an effort
+
+Claude Code sends `thinking: {type: "adaptive"}` plus `output_config: {effort: "xhigh"}` on every request, including ones aimed at a model it does not recognize. CLIProxyAPI's Anthropic-to-Codex translator reads exactly those fields (`internal/translator/codex/claude/codex_claude_request.go`): on `adaptive` it takes `output_config.effort` verbatim, falling back to `xhigh` when absent, and writes it to `reasoning.effort`.
+
+So a lane with no `effort` in its frontmatter runs GPT-5.6 at **xhigh** — the most expensive reasoning tier — no matter how cheap the model underneath is. That made `luna`, the lane chosen for bulk mechanical work, the most over-provisioned one in the set. Pinning effort per lane is what makes the cheap lanes actually cheap.
+
+Verified on this machine by capturing the wire body Claude Code sends (see the README's verification note), not inferred from docs.
+
+Related translator behavior worth knowing: `thinking: {type: "enabled", budget_tokens: N}` is bucketed to a level by `ConvertBudgetToLevel`, and `budget_tokens: 0` maps to `none`. A model-name suffix such as `gpt-5.6-terra(low)` is accepted by the proxy, but so is `gpt-5.6-terra(bogus)` — it returns 200 and silently ignores the level, so it is not a safe control surface.
 | gpt-5.5 | manual | Broad strong generalist, the Codex default. Mostly dominated by terra on price and sol on capability; use when a lane misbehaves. | — |
 | gpt-5.4 | manual | The long-context escape hatch: ~1M-token window for whole-repo or giant-log reads that exceed every other lane. | Ordinary tasks (terra is cheaper, sol is smarter) |
 | gpt-5.4-mini | manual | Cheap micro-subagents. | Anything load-bearing |
