@@ -20,7 +20,9 @@ Claude fast lanes still exist and are often right: sonnet for reading/exploratio
 
 - Lanes exist only in claudemix sessions (the splitter routes gpt-* models). In a plain session those agent types either do not exist or will error; check before promising them.
 - A lane's model comes from its agent-definition frontmatter. Inline `model` params cannot select gpt models.
-- Each lane also pins a reasoning `effort` in frontmatter, which becomes `reasoning.effort` upstream. Pick the lane whose effort suits the task rather than trying to override it per call; a lane with no effort silently runs at `xhigh`.
+- Model and effort are separate dials. Each lane pins a default `effort` in frontmatter, which becomes `reasoning.effort` upstream; a lane with no effort silently runs at `xhigh`.
+- In a Workflow, override the default per call: `agent(prompt, {agentType: 'sol', effort: 'low'})`. Use this when the task needs a particular model's capability but not its default depth, or the reverse. The Agent tool has no effort parameter, so there you must pick a lane whose pinned effort already fits (generate variants with `CLAUDEMIX_LANES` if you need more).
+- Verify effort like routing, from the log: `grep cliproxy ~/.local/state/claudemix/splitter.log` shows `model=<lane> effort=<level>` per request.
 - Brief executor lanes tightly: exact paths, exact done-criteria, "return evidence, not a dump". They execute; they do not re-plan.
 - Verify routing on first use of any lane in a session: `grep cliproxy ~/.local/state/claudemix/splitter.log` must show `model=<expected> status=200`. Never trust "I am GPT/Claude" claims.
 - Verify lane output like any subagent report: read the diff, run the checks. Executor reports are optimistic regardless of vendor.

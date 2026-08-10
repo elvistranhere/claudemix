@@ -117,8 +117,16 @@ const server = http.createServer((req, res) => {
   req.on('end', () => {
     const body = Buffer.concat(chunks);
     let model = null;
+    // Reasoning effort is the difference between a cheap lane and a flagship
+    // bill, and it is invisible everywhere else: the client picks it, the proxy
+    // translates it, neither logs it. Record it as metadata, never the body.
+    let effort = null;
     if (body.length) {
-      try { model = JSON.parse(body.toString('utf8')).model ?? null; } catch {}
+      try {
+        const parsed = JSON.parse(body.toString('utf8'));
+        model = parsed.model ?? null;
+        effort = parsed.output_config?.effort ?? null;
+      } catch {}
     }
     const toCliproxy = typeof model === 'string' && model.startsWith(GPT_PREFIX);
 
@@ -165,7 +173,7 @@ const server = http.createServer((req, res) => {
           res.end(JSON.stringify({ input_tokens }));
           return;
         }
-        log(`${route} ${req.method} ${req.url} model=${model ?? '-'} status=${up.statusCode}${attempt > 1 ? ' (retry)' : ''}`);
+        log(`${route} ${req.method} ${req.url} model=${model ?? '-'} effort=${effort ?? '-'} status=${up.statusCode}${attempt > 1 ? ' (retry)' : ''}`);
         res.writeHead(up.statusCode, up.headers);
         up.pipe(res);
       });

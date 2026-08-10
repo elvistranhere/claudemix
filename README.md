@@ -56,6 +56,27 @@ Inside the session, delegate to GPT with a lane agent type (Agent tool `subagent
 
 Each lane pins a reasoning effort, and that is not cosmetic. Claude Code sends `output_config: {effort: "xhigh"}` by default on every request, including ones aimed at a model it does not recognize, and CLIProxyAPI's translator forwards that straight into `reasoning.effort`. A lane without an explicit effort therefore runs at the most expensive reasoning tier regardless of how cheap its model is — which made the bulk lane the most over-provisioned one in the set. `claudemix verify` fails if any lane is missing its effort.
 
+### Varying effort independently of the model
+
+The pinned effort is a default, not a ceiling. How you override it depends on which surface you delegate through:
+
+**In a Workflow, effort is already a per-call option** — pass it alongside `agentType` and the lane's default is overridden on the wire:
+
+```js
+agent('...', { agentType: 'sol', effort: 'low' })    // sol's brain, cheap reasoning
+agent('...', { agentType: 'terra', effort: 'xhigh' }) // terra, thinking hard
+```
+
+**The Agent tool has no effort parameter**, so there the agent definition is the only routing surface. To get the same freedom, materialise the pairs you want as their own lanes:
+
+```sh
+CLAUDEMIX_LANES="sol:xhigh,sol:low,terra:medium,luna:low,spark:low" ./install.sh
+```
+
+That writes a `sol-low` agent alongside `sol`. A pair whose effort matches the lane default keeps the bare name; anything else gets `<lane>-<effort>`. Unknown lanes and invalid effort levels are reported and skipped rather than silently accepted. Leave `CLAUDEMIX_LANES` unset for the four defaults.
+
+Generated lanes carry a marker comment, and cleanup only removes files that have it — a hand-written agent pinned to one of these models is never touched by an install run.
+
 Lanes whose model stops being served are removed on the next install rather than left to fail at delegation time, and `claudemix verify` fails if any installed lane points at an unserved model.
 
 `models.md` is the rationale and the manual-override reference, including the models that get no standing lane (gpt-5.4 for ~1M-token context, gpt-5.4-mini for throwaway subagents). The `claudemix-routing` skill, installed to `~/.claude/skills/`, carries the decision procedure and the fallback ladder into every session.
@@ -78,7 +99,7 @@ Reliability: idle keep-alive sockets that the upstream closed are retried once o
 
 - Binds `127.0.0.1` only. Do not expose it.
 - Stores nothing: Anthropic credentials are forwarded as received; the CLIProxyAPI key is read from your existing config at request time and kept in memory only.
-- Logs contain routes, models, and status codes. Never headers or bodies.
+- Logs contain routes, models, reasoning effort, and status codes. Never headers or bodies.
 - Your Anthropic account's traffic remains an unmodified Claude Code client behind a base-URL gateway. The GPT side is your own OpenAI subscription through CLIProxyAPI, an arrangement OpenAI has publicly been permissive about. Read both providers' terms and make your own call; this is infrastructure, not legal advice.
 
 ## Configuration
@@ -89,6 +110,7 @@ Reliability: idle keep-alive sockets that the upstream closed are retried once o
 | `CLAUDEMIX_CLIPROXY_PORT` | `8317` | CLIProxyAPI port |
 | `CLAUDEMIX_CLIPROXY_CONF` | `/opt/homebrew/etc/cliproxyapi.conf` | Where to read the `sk-*` key |
 | `CLAUDEMIX_GPT_PREFIX` | `gpt-` | Model prefix routed to CLIProxyAPI |
+| `CLAUDEMIX_LANES` | *(the four defaults)* | Comma-separated `lane:effort` pairs to generate, e.g. `sol:xhigh,sol:low` |
 
 ## Hardening in this fork
 
