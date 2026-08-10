@@ -49,37 +49,18 @@ Inside the session, delegate to GPT with a lane agent type (Agent tool `subagent
 
 | Lane | Model | Effort | For |
 | --- | --- | --- | --- |
-| `sol` | gpt-5.6-sol | `xhigh` | The hardest delegated work: complex multi-file implementation, long agentic tool sessions, thorny debugging |
-| `terra` | gpt-5.6-terra | `medium` | The default executor: routine implementation, refactors, tests, docs, at roughly half sol's cost |
-| `luna` | gpt-5.6-luna | `low` | Bulk mechanical work: sweeps, renames, formatting, many small transforms |
-| `spark` | gpt-5.3-codex-spark | `low` | Real-time short scope: single-file edits and quick reviews at 1,000+ tok/s |
+| `terra` | gpt-5.6-terra | `high` | The default executor. Long-horizon work with a complete brief: features, refactors, test suites, migrations |
+| `sol` | gpt-5.6-sol | `xhigh` | Work that is genuinely hard: many interacting files, long tool-call horizons, non-obvious debugging. Roughly twice the cost |
 
-Each lane pins a reasoning effort, and that is not cosmetic. Claude Code sends `output_config: {effort: "xhigh"}` by default on every request, including ones aimed at a model it does not recognize, and CLIProxyAPI's translator forwards that straight into `reasoning.effort`. A lane without an explicit effort therefore runs at the most expensive reasoning tier regardless of how cheap its model is — which made the bulk lane the most over-provisioned one in the set. `claudemix verify` fails if any lane is missing its effort.
+Both lanes are sized for **long-horizon execution** — give one a complete brief and let it run to completion. A cheap bulk lane and a real-time lane existed here and were removed: work small enough to suit them is work not worth the round trip of delegating, and every extra lane is another routing decision to get wrong.
 
-### Varying effort independently of the model
+The pinned effort is not cosmetic. Claude Code sends `output_config: {effort: "xhigh"}` by default on every request, including ones aimed at a model it does not recognize, and CLIProxyAPI's translator forwards that straight into `reasoning.effort`. A lane without an explicit effort runs at the most expensive tier whatever model is underneath it. `claudemix verify` fails if a lane is missing one.
 
-The pinned effort is a default, not a ceiling. How you override it depends on which surface you delegate through:
+It is a default, not a ceiling: in a Workflow, override it per call with `agent(prompt, {agentType: 'terra', effort: 'low'})`. The Agent tool has no effort parameter, so there you get the lane default.
 
-**In a Workflow, effort is already a per-call option** — pass it alongside `agentType` and the lane's default is overridden on the wire:
+Lanes whose model stops being served are removed on the next install rather than left to fail at delegation time. Generated lanes carry a marker comment and cleanup only removes files that have it, so a hand-written agent — even one pinned to a lane model — is never touched by an install run.
 
-```js
-agent('...', { agentType: 'sol', effort: 'low' })    // sol's brain, cheap reasoning
-agent('...', { agentType: 'terra', effort: 'xhigh' }) // terra, thinking hard
-```
-
-**The Agent tool has no effort parameter**, so there the agent definition is the only routing surface. To get the same freedom, materialise the pairs you want as their own lanes:
-
-```sh
-CLAUDEMIX_LANES="sol:xhigh,sol:low,terra:medium,luna:low,spark:low" ./install.sh
-```
-
-That writes a `sol-low` agent alongside `sol`. A pair whose effort matches the lane default keeps the bare name; anything else gets `<lane>-<effort>`. Unknown lanes and invalid effort levels are reported and skipped rather than silently accepted. Leave `CLAUDEMIX_LANES` unset for the four defaults.
-
-Generated lanes carry a marker comment, and cleanup only removes files that have it — a hand-written agent pinned to one of these models is never touched by an install run.
-
-Lanes whose model stops being served are removed on the next install rather than left to fail at delegation time, and `claudemix verify` fails if any installed lane points at an unserved model.
-
-`models.md` is the rationale and the manual-override reference, including the models that get no standing lane (gpt-5.4 for ~1M-token context, gpt-5.4-mini for throwaway subagents). The `claudemix-routing` skill, installed to `~/.claude/skills/`, carries the decision procedure and the fallback ladder into every session.
+`models.md` is the rationale and the manual-override reference, including models that get no standing lane. The `claudemix-routing` skill, installed to `~/.claude/skills/`, carries the decision procedure into every session.
 
 ## The three gotchas that matter
 
@@ -110,7 +91,6 @@ Reliability: idle keep-alive sockets that the upstream closed are retried once o
 | `CLAUDEMIX_CLIPROXY_PORT` | `8317` | CLIProxyAPI port |
 | `CLAUDEMIX_CLIPROXY_CONF` | `/opt/homebrew/etc/cliproxyapi.conf` | Where to read the `sk-*` key |
 | `CLAUDEMIX_GPT_PREFIX` | `gpt-` | Model prefix routed to CLIProxyAPI |
-| `CLAUDEMIX_LANES` | *(the four defaults)* | Comma-separated `lane:effort` pairs to generate, e.g. `sol:xhigh,sol:low` |
 
 ## Hardening in this fork
 
@@ -160,6 +140,17 @@ Do it anyway and you would probably regret it. The raw API window for the 5.6 ti
 So 200K is close to the right number for this path, not a shortfall to work around. Spark's 256K is the only lane meaningfully under-served, and being conservative there costs nothing.
 
 Sources: [Codex context metadata issue](https://github.com/openai/codex/issues/32486), [GPT-5.6 Sol specifications](https://gate.ai/blog/gpt-5-6-sol-openai-specs-pricing-api-access-use-cases), [GPT-5.6 limits guide](https://www.layer3labs.io/guides/gpt-5-6-limits)
+
+### Lanes do not compact, so stage long work
+
+Claude Code's unknown-model warning says auto-compact will keep a session within the 200K window it assumes. That is not what a lane does. Measured: a lane instructed to keep reading 80KB files exhausted its context at **~128k tokens**, stopped mid-file, and reported how far it got — it did not summarise and continue. Other times the same wall arrives as a hard `Prompt is too long` with no output at all.
+
+Two consequences for long-horizon work, which is what these lanes are for:
+
+- **A lane call is bounded work, not an unbounded session.** For a job bigger than roughly 100k tokens of reading, stage it across several calls with state on disk between them — a `pipeline()` in a Workflow, or sequential Agent calls that each pick up the previous checkpoint.
+- **Checkpointing is what makes a long run survivable.** The generated lane prompts tell each lane to keep progress on disk and, if the budget runs out, to stop deliberately and hand over cleanly rather than dying mid-edit.
+
+`Read` caps a single call at 25k tokens, so one oversized file cannot blow the window on its own — the risk is accumulation across many reads, not any single one.
 
 ### Brief lanes with bounded input
 

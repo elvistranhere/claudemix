@@ -6,10 +6,10 @@ Research snapshot 2026-08-10. The installer turns the served subset of these int
 
 | Model | Lane | Effort | Use for | Avoid for |
 |---|---|---|---|---|
-| gpt-5.6-sol | `sol` | `xhigh` | The hardest autonomous work: complex multi-file coding, long agentic sessions with many tool calls, cybersecurity-grade analysis. Flagship; SOTA on BrowseComp (92.2%) and OSWorld 2.0, notably token-efficient for its tier. | High-volume trivial tasks (wasteful), real-time interactive loops |
-| gpt-5.6-terra | `terra` | `medium` | The default executor: routine implementation, refactors, test-writing, doc passes. GPT-5.5-level competence at roughly half the cost. | Frontier-difficulty reasoning, very long horizons |
-| gpt-5.6-luna | `luna` | `low` | Bulk and speed: mechanical sweeps, formatting, simple transforms, high-volume small tasks. Near GPT-5.5 quality at a fraction of the cost, and the July 30 price cut made it 80% cheaper again. | Anything needing sustained multi-step judgment |
-| gpt-5.3-codex-spark | `spark` | `low` | Real-time short-scope work: instant single-file edits, quick reviews, tight feedback loops. 1,000+ tok/s on Cerebras. | Long tasks (256K context, pair-programmer mode, not an autonomous agent) |
+| gpt-5.6-terra | `terra` | `high` | The default executor: long-horizon implementation, refactors, test suites, migrations, at roughly half sol's cost. | Frontier-difficulty reasoning where the approach is not yet known |
+| gpt-5.6-sol | `sol` | `xhigh` | The hardest autonomous work: many interacting files, long agentic sessions with many tool calls, non-obvious debugging. Flagship; SOTA on BrowseComp (92.2%) and OSWorld 2.0, notably token-efficient for its tier. | Work terra can do (twice the cost for no gain) |
+| gpt-5.6-luna | manual | — | Bulk mechanical work at a fraction of the cost. **No standing lane**: work small enough to suit it is work not worth delegating, and the lane was another routing decision to get wrong. | Anything needing sustained multi-step judgment |
+| gpt-5.3-codex-spark | manual | — | Real-time short-scope edits at 1,000+ tok/s on Cerebras. **No standing lane**, and a poor fit for this setup: no chain-of-thought phase at all, so reasoning config is silently ignored, and it is a pair-programmer rather than an autonomous agent. | Long tasks, which is all these lanes do |
 
 ### Why every lane pins an effort
 

@@ -1,31 +1,33 @@
 ---
 name: claudemix-routing
-description: Choose the right model lane when delegating subagent work in a claudemix mixed-model session. Use whenever spawning executor subagents and more than one lane (sol/terra/luna/spark, or Claude models) could plausibly take the task.
+description: Choose between the GPT executor lanes (sol, terra) and keeping work on Claude when delegating in a claudemix mixed-model session. Use whenever spawning executor subagents for substantial work.
 ---
 
 # claudemix lane routing
 
-You are the orchestrator; the lanes are executors. Route by workload shape, verify by log, never by model self-report.
+You orchestrate; the lanes execute. They run on the Codex subscription, so shifting executor volume to them spends a different budget than your own turns — which matters, because Claude rate limit is usually the scarce resource, not tokens.
 
-## The decision in four questions
+## The decision
 
-1. **Does it need frontier judgment under ambiguity** (root-cause analysis, subtle correctness, adversarial verification)? Keep it on the Claude side: your own turn, or an opus-pinned subagent. Do not outsource judgment to an executor lane.
-2. **Is it well-specified executor work** (implement to a spec, write tests to a contract, refactor with clear done-criteria)? Default `terra`. Escalate to `sol` only when the task is genuinely hard: many interacting files, long tool-call horizons, gnarly debugging execution.
-3. **Is it bulk and mechanical** (sweeps, renames, formatting, many small independent transforms)? `luna`, fanned out. Falls over on multi-step judgment; keep each unit trivial.
-4. **Is it tiny and latency-sensitive** (one-file tweak, quick review pass)? `spark`. Hard limits: small context, pair-programmer mode; if the task needs more than a few steps, use terra instead.
+**Keep it on Claude** when the work is judgment under ambiguity: root-causing something you do not yet understand, deciding what to build, adversarial verification, anything where the answer's correctness is contested. Your own turn, or an opus subagent. Do not outsource the thinking.
 
-Claude fast lanes still exist and are often right: sonnet for reading/exploration/summarizing, haiku for trivial lookups. The GPT lanes' edge is that they spend the Codex budget, not the Claude one; when Claude usage is the constraint, shift executor volume to terra/luna.
+**Delegate to a lane** when the work is substantial and the brief can be made complete: implement this feature, do this migration, write these tests to this contract, fix this failing suite. Lanes are for long-horizon execution, not errands — a task small enough to finish in a couple of tool calls is not worth the round trip of briefing one.
+
+- `terra` is the default. Reach for it unless you have a reason not to.
+- `sol` is for work that is genuinely hard: many interacting files, a long tool-call horizon, debugging where the fix is not obvious. Roughly twice the cost.
+
+There is no cheap bulk lane by design. Work that would suit one is work you should do inline.
+
+Claude's own fast lanes still apply for reading and summarizing — sonnet for exploration, haiku for lookups.
 
 ## Rules that survive contact
 
-- Lanes exist only in claudemix sessions (the splitter routes gpt-* models). In a plain session those agent types either do not exist or will error; check before promising them.
+- Lanes exist only in claudemix sessions and are read at session start; a lane generated after a session began will not resolve in it.
 - A lane's model comes from its agent-definition frontmatter. Inline `model` params cannot select gpt models.
-- Model and effort are separate dials. Each lane pins a default `effort` in frontmatter, which becomes `reasoning.effort` upstream; a lane with no effort silently runs at `xhigh`.
-- In a Workflow, override the default per call: `agent(prompt, {agentType: 'sol', effort: 'low'})`. Use this when the task needs a particular model's capability but not its default depth, or the reverse. The Agent tool has no effort parameter, so there you must pick a lane whose pinned effort already fits (generate variants with `CLAUDEMIX_LANES` if you need more).
-- Verify effort like routing, from the log: `grep cliproxy ~/.local/state/claudemix/splitter.log` shows `model=<lane> effort=<level>` per request.
-- Brief executor lanes tightly: exact paths, exact done-criteria, "return evidence, not a dump". They execute; they do not re-plan.
-- Bound the input, not the ambition. Long multi-file builds are what `sol` is for; what kills a lane is open-ended *reading*, not a long task. A brief that says "read what you need" or "run the diff and review it" lets a lane read until it overruns its window, and the task dies with `Prompt is too long` rather than degrading. Observed: four lanes given an open-ended review brief all died; the same review with three named files and "read nothing else" ran fine in 24k tokens. Name the files, or hand over the excerpt yourself, then let the lane work as long as the job needs.
-- Verify routing on first use of any lane in a session: `grep cliproxy ~/.local/state/claudemix/splitter.log` must show `model=<expected> status=200`. Never trust "I am GPT/Claude" claims.
-- Verify lane output like any subagent report: read the diff, run the checks. Executor reports are optimistic regardless of vendor.
-- Long-context outlier (whole-repo reads beyond every lane): gpt-5.4 serves ~1M tokens; no standing lane, pin it in a one-off agent definition if truly needed.
-- If a lane errors or degrades (429s from Codex limits, empty outputs), fall back one step: spark→terra, luna→terra, terra→sol, sol→Claude opus. Note the fallback in your report.
+- Each lane pins a default reasoning `effort` (`sol` xhigh, `terra` high) which becomes `reasoning.effort` upstream. In a Workflow you can override it per call — `agent(prompt, {agentType: 'terra', effort: 'low'})` — when a task needs a model's capability but not its depth. The Agent tool has no effort parameter, so there you get the lane default.
+- **Bound the input, not the ambition.** Long multi-file builds are exactly what these lanes are for; what kills one is open-ended *reading*. A brief saying "read what you need" or "run the diff and review it" lets a lane read until it overruns its window, and the task then dies with `Prompt is too long` rather than degrading — you lose everything, with no partial result. Observed: four lanes given an open-ended review brief all died; the same review scoped to three named files with "read nothing else" ran fine in 24k tokens. Name the files, or hand over the excerpt yourself, then let the lane run as long as the job needs.
+- Brief for completion: state the done-criteria and how to check them. A lane that knows what "finished" means will keep going; one that does not will hand back a plan.
+- **Lanes do not compact.** Measured: a lane told to keep reading exhausted its context at ~128k tokens and stopped mid-file rather than summarising and continuing. So a single lane call is bounded work, not an unbounded session. For a job larger than that, stage it across several calls and carry state on disk between them — a `pipeline()` in a Workflow, or sequential Agent calls that each read the previous checkpoint. Tell the lane where to write its checkpoint; the generated prompts already tell it to keep one.
+- Verify routing from the log, never from self-report: `grep cliproxy ~/.local/state/claudemix/splitter.log` shows `model=<lane> effort=<level> status=<code>` per request.
+- Verify a lane's output like any subagent report — read the diff, run the checks. A lane will also confidently report an environmental block (a rate limit, a redirect) as a tool failure, so check its evidence rather than its verdict.
+- On failure or degradation, fall back one step: terra → sol, sol → Claude opus. Say so in your report.
