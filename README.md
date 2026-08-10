@@ -16,11 +16,17 @@ loopback splitter (127.0.0.1:8318, ~110 lines of Node you can read)
 
 Claude Code's API endpoint is process-global, so per-agent routing needs a gateway in front. Existing mixed-model setups put the Claude subscription login inside the proxy too, which re-originates your Claude traffic under a spoofed client identity. This project does not do that: Anthropic-bound requests pass through untouched with the session's own credentials, which is the same base-URL gateway pattern Anthropic documents for enterprise LLM gateways. Only `gpt-*` requests are re-authed, with a local key, to a CLIProxyAPI instance that holds only your OpenAI/Codex OAuth.
 
-## Quick start (agent setup)
+## Quick start
 
-Paste the raw contents of [SETUP.md](SETUP.md) into Claude Code (or any capable coding agent) on your machine and let it do the whole thing: install the splitter, add the `claudemix` shell function, create the GPT subagent, and run the verification tests.
+```sh
+git clone https://github.com/elvistranhere/claudemix && cd claudemix
+./install.sh          # installs everything, idempotent
+claudemix login       # one browser sign-in to OpenAI/Codex
+./install.sh          # rerun: detects the served model, writes the sol agent
+claudemix verify      # end-to-end battery incl. tool use, log-verified
+```
 
-Manual setup is the same four steps; SETUP.md doubles as the documentation.
+`claudemix` then launches mixed-model sessions; `claudemix status` / `log` for introspection. SETUP.md remains as the manual/agent-driven path and documentation.
 
 ## Prerequisites
 
