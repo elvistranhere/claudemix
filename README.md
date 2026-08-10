@@ -22,7 +22,7 @@ Claude Code's API endpoint is process-global, so per-agent routing needs a gatew
 git clone https://github.com/elvistranhere/claudemix && cd claudemix
 ./install.sh          # installs everything, idempotent
 claudemix login       # one browser sign-in to OpenAI/Codex
-./install.sh          # rerun: detects the served model, writes the sol agent
+./install.sh          # rerun: detects served models, writes the agent lanes
 claudemix verify      # end-to-end battery incl. tool use, log-verified
 ```
 
@@ -41,7 +41,22 @@ claudemix                 # normal session, Claude main model
 claudemix --dangerously-skip-permissions
 ```
 
-Inside the session, delegate to GPT with the `sol` agent type (Agent tool `subagent_type: sol`, or `agentType: 'sol'` in Workflow scripts). The main model, and any subagent without a gpt model pinned, stays on Claude as normal.
+Inside the session, delegate to GPT with a lane agent type (Agent tool `subagent_type: terra`, or `agentType: 'terra'` in Workflow scripts). The main model, and any subagent without a gpt model pinned, stays on Claude as normal.
+
+## Model lanes
+
+`install.sh` writes one agent lane per served model, so routing needs no configuration and no prompting. Claude Code picks a subagent by reading agent descriptions, so each lane's description states what it is good at and the orchestrator routes to it on its own.
+
+| Lane | Model | For |
+| --- | --- | --- |
+| `sol` | gpt-5.6-sol | The hardest delegated work: complex multi-file implementation, long agentic tool sessions, thorny debugging |
+| `terra` | gpt-5.6-terra | The default executor: routine implementation, refactors, tests, docs, at roughly half sol's cost |
+| `luna` | gpt-5.6-luna | Bulk mechanical work: sweeps, renames, formatting, many small transforms |
+| `spark` | gpt-5.3-codex-spark | Real-time short scope: single-file edits and quick reviews at 1,000+ tok/s |
+
+Lanes whose model stops being served are removed on the next install rather than left to fail at delegation time, and `claudemix verify` fails if any installed lane points at an unserved model.
+
+`models.md` is the rationale and the manual-override reference, including the models that get no standing lane (gpt-5.4 for ~1M-token context, gpt-5.4-mini for throwaway subagents). The `claudemix-routing` skill, installed to `~/.claude/skills/`, carries the decision procedure and the fallback ladder into every session.
 
 ## The three gotchas that matter
 
@@ -78,8 +93,9 @@ Reliability: idle keep-alive sockets that the upstream closed are retried once o
 - `proxyKey()` parses the uncommented `api-keys:` block instead of grabbing the first `sk-*` string in the file. The stock brew config ships with five commented-out `sk-*` doc examples and placeholder keys, which the upstream regex happily matched, yielding 401s on a fresh install.
 - `count_tokens` on the gpt lane degrades to a local estimate when CLIProxyAPI does not implement it, instead of surfacing an API error inside the session.
 - `GET /claudemix/status` reports uptime, config, CLIProxyAPI reachability, and the model list it serves.
-- `install-launchd.sh` runs the splitter as a supervised launchd agent (starts at login, restarts on crash) instead of a one-shot nohup.
-- `verify.sh` extends the echo round-trip with tool-use, strict-JSON, and count_tokens checks, all verified against the splitter log rather than model self-report.
+- `install-launchd.sh` runs the splitter as a supervised launchd agent (starts at login, restarts on crash) instead of a one-shot nohup. It converges rather than restarting: a rerun that changes nothing leaves the running splitter alone, which matters because the session running the installer is proxying through that port. It also waits for `bootout` to finish before `bootstrap` (racing it returns `Bootstrap failed: 5: Input/output error`), hands the port over from any unmanaged splitter, and fails loudly if the launchd job is not the process actually holding the port. Without that last check the job can look loaded while supervising nothing, because the splitter exits 0 on `EADDRINUSE`.
+- `verify.sh` extends the echo round-trip with tool-use, strict-JSON, count_tokens, and lane-integrity checks, all verified against the splitter log rather than model self-report.
+- Agent lanes and the routing skill are generated from the served model list, so delegation is seamless instead of something you have to remember to configure.
 - The log rotates at 10MB.
 
 ## License

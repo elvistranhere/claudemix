@@ -4,8 +4,9 @@
 #   2. Installs the splitter + verify script under ~/.claudemix
 #   3. Supervises the splitter with launchd
 #   4. Installs the claudemix shell command (launch / login / verify / status / log)
-#   5. Writes the sol GPT subagent when a served gpt-* model is detectable
+#   5. Writes one agent lane per served gpt-* model, plus the routing skill
 # After a fresh install the only manual step is: claudemix login && ./install.sh
+# Reruns leave a healthy splitter running rather than restarting it.
 set -eu
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -41,9 +42,11 @@ echo "cliproxyapi running"
 
 step "splitter"
 mkdir -p "$HOME/.claudemix"
+FORCE_RESTART=0
+cmp -s "$REPO_DIR/claudemix-splitter.mjs" "$HOME/.claudemix/claudemix-splitter.mjs" || FORCE_RESTART=1
 cp "$REPO_DIR/claudemix-splitter.mjs" "$REPO_DIR/verify.sh" "$HOME/.claudemix/"
 chmod +x "$HOME/.claudemix/claudemix-splitter.mjs" "$HOME/.claudemix/verify.sh"
-sh "$REPO_DIR/install-launchd.sh"
+CLAUDEMIX_FORCE_RESTART="$FORCE_RESTART" sh "$REPO_DIR/install-launchd.sh"
 
 step "shell command"
 RC="$HOME/.zshrc"; case "${SHELL:-}" in */bash) RC="$HOME/.bashrc";; esac
@@ -78,35 +81,56 @@ rc.write_text(text.rstrip() + "\n\n" + block + "\n")
 print(f"claudemix command installed into {rc}")
 EOF
 
-step "sol agent"
-SLUG="$(curl -s --max-time 3 "http://127.0.0.1:${PORT}/claudemix/status" | python3 -c 'import json,sys
-import re
-models = (json.load(sys.stdin).get("cliproxy") or {}).get("models") or []
-def ver(m):
-    n = re.match(r"gpt-(\d+)\.(\d+)", m)
-    return (int(n.group(1)), int(n.group(2))) if n else (0, 0)
-gpt = [m for m in models if m.startswith("gpt-") and not re.search(r"image|mini", m)]
-gpt.sort(key=lambda m: (ver(m), m.endswith("-sol")), reverse=True)
-print(gpt[0] if gpt else "")' 2>/dev/null || true)"
-if [ -n "$SLUG" ]; then
-  mkdir -p "$HOME/.claude/agents"
-  cat > "$HOME/.claude/agents/sol.md" <<EOF
----
-name: sol
-description: GPT executor lane (works only inside a claudemix session, where the splitter routes gpt-* models to CLIProxyAPI). Use for delegated executor and writer tasks.
-model: ${SLUG}
----
+step "agent lanes + routing skill"
+MODELS_JSON="$(curl -s --max-time 3 "http://127.0.0.1:${PORT}/claudemix/status" || true)"
+mkdir -p "$HOME/.claude/agents" "$HOME/.claude/skills/claudemix-routing"
+cp "$REPO_DIR/skills/claudemix-routing/SKILL.md" "$HOME/.claude/skills/claudemix-routing/SKILL.md"
+python3 - "$MODELS_JSON" <<'EOF'
+import json, os, sys
 
-You are a delegated executor subagent. Perform exactly the task briefed, verify your work against the stated done criteria, and return a terse summary with evidence, never a dump. Do not re-plan the wider job or spawn further orchestration.
+try:
+    models = set((json.loads(sys.argv[1]).get("cliproxy") or {}).get("models") or [])
+except Exception:
+    models = set()
+
+lanes = [
+    ("sol", "gpt-5.6-sol",
+     "Deep GPT executor lane for the hardest delegated work: complex multi-file implementation, long agentic tool sessions, thorny debugging execution. Works only inside a claudemix session.",
+     "You are the deep executor lane for hard, well-briefed work."),
+    ("terra", "gpt-5.6-terra",
+     "Default GPT executor lane for routine implementation, refactors, test-writing, and doc passes at low cost. Prefer over sol when the task is well-specified and of moderate difficulty. Works only inside a claudemix session.",
+     "You are the default executor lane for well-specified routine work."),
+    ("luna", "gpt-5.6-luna",
+     "Fast cheap GPT lane for bulk mechanical work: sweeps, renames, formatting, high-volume small transforms. Not for multi-step judgment. Works only inside a claudemix session.",
+     "You are the bulk lane. Each task you receive is small and mechanical; do exactly it."),
+    ("spark", "gpt-5.3-codex-spark",
+     "Real-time GPT lane, 1000+ tokens per second with a small context: instant single-file edits and quick review passes with tiny scope. Not for long tasks. Works only inside a claudemix session.",
+     "You are the real-time lane. Scope is tiny by design; if the task needs more than a few steps, say so and stop."),
+]
+
+body = """Perform exactly the task briefed, verify your work against the stated done criteria, and return a terse summary with evidence, never a dump. Do not re-plan the wider job or spawn further orchestration."""
+
+agents_dir = os.path.expanduser("~/.claude/agents")
+for name, model, description, opener in lanes:
+    path = os.path.join(agents_dir, f"{name}.md")
+    if model in models:
+        with open(path, "w") as f:
+            f.write(f"---\nname: {name}\ndescription: {description}\nmodel: {model}\n---\n\n{opener} {body}\n")
+        print(f"lane {name} -> {model}")
+    elif os.path.exists(path) and f"model: {model}" in open(path).read():
+        os.remove(path)
+        print(f"lane {name} removed ({model} no longer served)")
+
+if not models:
+    print("no models served yet (Codex login pending); lanes unchanged")
 EOF
-  echo "sol agent written with model ${SLUG}"
-  echo ""
-  echo "DONE. Open a new shell (or: source $RC), then run: claudemix verify"
-else
-  echo "no gpt-* model served yet (Codex login pending)"
+if [ -z "$(curl -s --max-time 3 "http://127.0.0.1:${PORT}/claudemix/status" | grep -o 'gpt-')" ]; then
   echo ""
   echo "NEXT: open a new shell (or: source $RC), then:"
   echo "  claudemix login      # browser sign-in to OpenAI/Codex"
-  echo "  ./install.sh         # rerun; detects the model and writes the sol agent"
+  echo "  ./install.sh         # rerun; detects models and writes the agent lanes"
   echo "  claudemix verify"
+else
+  echo ""
+  echo "DONE. Open a new shell (or: source $RC), then: claudemix verify"
 fi

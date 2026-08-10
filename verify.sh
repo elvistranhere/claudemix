@@ -57,5 +57,25 @@ else
   echo "SKIP  T6 count_tokens (no such request observed this run)"
 fi
 
+# T7: every installed lane points at a model CLIProxyAPI actually serves.
+# A lane whose model disappeared still looks like a valid agent type and fails
+# only at delegation time, which is the worst place to find out.
+LANES=0; STALE=""
+for f in "$HOME"/.claude/agents/*.md; do
+  [ -f "$f" ] || continue
+  M="$(sed -n 's/^model: *//p' "$f" | head -1)"
+  case "$M" in
+    gpt-*) LANES=$((LANES+1))
+           echo "$STATUS_JSON" | grep -q "\"$M\"" || STALE="$STALE $(basename "$f" .md)->$M" ;;
+  esac
+done
+if [ "$LANES" -eq 0 ]; then
+  echo "SKIP  T7 lane integrity (no gpt lanes installed; run ./install.sh)"
+elif [ -n "$STALE" ]; then
+  bad "T7 lane integrity" "unserved:$STALE"
+else
+  ok "T7 lane integrity ($LANES lanes)"
+fi
+
 echo "RESULT: $PASS pass, $FAIL fail"
 [ "$FAIL" -eq 0 ]
