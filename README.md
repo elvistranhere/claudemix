@@ -67,6 +67,15 @@ Reliability: idle keep-alive sockets that the upstream closed are retried once o
 | `CLAUDEMIX_CLIPROXY_CONF` | `/opt/homebrew/etc/cliproxyapi.conf` | Where to read the `sk-*` key |
 | `CLAUDEMIX_GPT_PREFIX` | `gpt-` | Model prefix routed to CLIProxyAPI |
 
+## Hardening in this fork
+
+- `proxyKey()` parses the uncommented `api-keys:` block instead of grabbing the first `sk-*` string in the file. The stock brew config ships with five commented-out `sk-*` doc examples and placeholder keys, which the upstream regex happily matched, yielding 401s on a fresh install.
+- `count_tokens` on the gpt lane degrades to a local estimate when CLIProxyAPI does not implement it, instead of surfacing an API error inside the session.
+- `GET /claudemix/status` reports uptime, config, CLIProxyAPI reachability, and the model list it serves.
+- `install-launchd.sh` runs the splitter as a supervised launchd agent (starts at login, restarts on crash) instead of a one-shot nohup.
+- `verify.sh` extends the echo round-trip with tool-use, strict-JSON, and count_tokens checks, all verified against the splitter log rather than model self-report.
+- The log rotates at 10MB.
+
 ## License
 
 MIT

@@ -17,7 +17,7 @@
 
 import http from 'node:http';
 import https from 'node:https';
-import { readFileSync, statSync, mkdirSync, appendFileSync } from 'node:fs';
+import { readFileSync, statSync, mkdirSync, appendFileSync, renameSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -27,22 +27,42 @@ const CLIPROXY_PORT = Number(process.env.CLAUDEMIX_CLIPROXY_PORT || 8317);
 const CLIPROXY_CONF = process.env.CLAUDEMIX_CLIPROXY_CONF || '/opt/homebrew/etc/cliproxyapi.conf';
 const GPT_PREFIX = process.env.CLAUDEMIX_GPT_PREFIX || 'gpt-';
 const ANTHROPIC_HOST = 'api.anthropic.com';
+const STARTED_AT = Date.now();
 
 const LOG_DIR = path.join(homedir(), '.local', 'state', 'claudemix');
 mkdirSync(LOG_DIR, { recursive: true });
 const LOG_FILE = path.join(LOG_DIR, 'splitter.log');
+const LOG_ROTATE_BYTES = 10 * 1024 * 1024;
 function log(line) {
-  try { appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}\n`); } catch {}
+  try {
+    try { if (statSync(LOG_FILE).size > LOG_ROTATE_BYTES) renameSync(LOG_FILE, `${LOG_FILE}.1`); } catch {}
+    appendFileSync(LOG_FILE, `${new Date().toISOString()} ${line}\n`);
+  } catch {}
 }
 
 // CLIProxyAPI local API key, cached by config mtime. The key stays in memory only.
+// Keys are read from the uncommented api-keys: block; the default brew config is
+// full of commented-out sk-* doc examples that a bare regex would match first.
 let keyCache = { mtimeMs: 0, key: null };
 function proxyKey() {
   const { mtimeMs } = statSync(CLIPROXY_CONF);
   if (mtimeMs !== keyCache.mtimeMs) {
-    const match = readFileSync(CLIPROXY_CONF, 'utf8').match(/\b(sk-[A-Za-z0-9._-]+)\b/);
-    if (!match) throw new Error('no sk-* api key found in cliproxyapi config');
-    keyCache = { mtimeMs, key: match[1] };
+    const lines = readFileSync(CLIPROXY_CONF, 'utf8').split('\n').filter((l) => !/^\s*#/.test(l));
+    const blockKeys = [];
+    let inKeys = false;
+    for (const line of lines) {
+      if (/^api-keys:\s*$/.test(line)) { inKeys = true; continue; }
+      if (inKeys) {
+        const m = line.match(/^\s+-\s*"?([^"\s#]+)"?/);
+        if (m) { blockKeys.push(m[1]); continue; }
+        if (/^\S/.test(line)) inKeys = false;
+      }
+    }
+    const usable = blockKeys.filter((k) => !/^your-api-key/.test(k));
+    const key = usable.find((k) => k.startsWith('sk-')) ?? usable[0] ??
+      (lines.join('\n').match(/\b(sk-[A-Za-z0-9._-]+)\b/) || [])[1] ?? null;
+    if (!key) throw new Error('no usable key in cliproxyapi config api-keys block');
+    keyCache = { mtimeMs, key };
   }
   return keyCache.key;
 }
@@ -50,7 +70,47 @@ function proxyKey() {
 const anthropicAgent = new https.Agent({ keepAlive: true, maxSockets: 64 });
 const cliproxyAgent = new http.Agent({ keepAlive: true, maxSockets: 64 });
 
+// Local introspection endpoint, outside both upstream API namespaces.
+function handleStatus(res) {
+  const reply = (cliproxy) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: true,
+      port: PORT,
+      uptime_s: Math.round((Date.now() - STARTED_AT) / 1000),
+      gpt_prefix: GPT_PREFIX,
+      log_file: LOG_FILE,
+      cliproxy,
+    }));
+  };
+  let key = null;
+  try { key = proxyKey(); } catch (err) {
+    reply({ reachable: false, error: err.message });
+    return;
+  }
+  const probe = http.request(
+    { host: CLIPROXY_HOST, port: CLIPROXY_PORT, path: '/v1/models', method: 'GET',
+      headers: { authorization: `Bearer ${key}` }, timeout: 2000 },
+    (up) => {
+      const parts = [];
+      up.on('data', (c) => parts.push(c));
+      up.on('end', () => {
+        let models = null;
+        try { models = (JSON.parse(Buffer.concat(parts).toString('utf8')).data ?? []).map((m) => m.id); } catch {}
+        reply({ reachable: true, status: up.statusCode, models });
+      });
+    },
+  );
+  probe.on('error', (err) => reply({ reachable: false, error: err.code || err.message }));
+  probe.on('timeout', () => { probe.destroy(); reply({ reachable: false, error: 'timeout' }); });
+  probe.end();
+}
+
 const server = http.createServer((req, res) => {
+  if (req.method === 'GET' && req.url === '/claudemix/status') {
+    handleStatus(res);
+    return;
+  }
   const chunks = [];
   req.on('data', (c) => chunks.push(c));
   req.on('error', () => res.destroy());
@@ -81,6 +141,10 @@ const server = http.createServer((req, res) => {
       headers.host = ANTHROPIC_HOST;
     }
     const route = toCliproxy ? 'cliproxy' : 'anthropic';
+    // Claude Code calls count_tokens on every model; CLIProxyAPI builds may not
+    // implement it for translated backends. A failed count must degrade to an
+    // estimate rather than surface as an API error inside the session.
+    const countTokensFallback = toCliproxy && req.url.includes('/count_tokens');
 
     // A pooled keep-alive socket can be closed server-side while idle; the next
     // write then fails (ECONNRESET/EPIPE) before any response bytes arrive. The
@@ -93,6 +157,14 @@ const server = http.createServer((req, res) => {
         : https.request({ host: ANTHROPIC_HOST, port: 443, path: req.url, method: req.method, headers, agent: attempt === 1 ? anthropicAgent : false });
       upstream.setTimeout(0);
       upstream.on('response', (up) => {
+        if (countTokensFallback && up.statusCode >= 400) {
+          up.resume();
+          const input_tokens = Math.max(1, Math.ceil(body.length / 4));
+          log(`${route} ${req.method} ${req.url} model=${model ?? '-'} status=${up.statusCode} count-tokens-estimated=${input_tokens}`);
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ input_tokens }));
+          return;
+        }
         log(`${route} ${req.method} ${req.url} model=${model ?? '-'} status=${up.statusCode}${attempt > 1 ? ' (retry)' : ''}`);
         res.writeHead(up.statusCode, up.headers);
         up.pipe(res);
