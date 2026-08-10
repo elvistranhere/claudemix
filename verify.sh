@@ -14,10 +14,10 @@ PASS=0; FAIL=0
 ok()  { PASS=$((PASS+1)); echo "PASS  $1"; }
 bad() { FAIL=$((FAIL+1)); echo "FAIL  $1${2:+  ($2)}"; }
 
-run_claude() { # $1 extra args, $2 prompt
-  env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u CLAUDE_CODE_SUBAGENT_MODEL \
+run_claude() { # $1 extra args, $2 prompt (stdin: --allowedTools is variadic and would swallow a positional prompt)
+  printf '%s' "$2" | env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY -u CLAUDE_CODE_SUBAGENT_MODEL \
     ANTHROPIC_BASE_URL="$BASE" ENABLE_TOOL_SEARCH=true \
-    claude -p $1 "$2" 2>/dev/null
+    claude -p $1 2>/dev/null
 }
 
 # T1: splitter up + status endpoint
