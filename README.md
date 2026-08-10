@@ -135,6 +135,19 @@ printf 'hi' | env -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
 
 That is how the `output_config.effort` default above was established. Note `timeout` is not present on stock macOS, so leave it out of probe scripts or the command silently never runs.
 
+### What tools survive the translation layer
+
+Audited by having each lane test its own tool access. All four agreed:
+
+| Tool | Status |
+| --- | --- |
+| Bash, Read, WebFetch, WebSearch | works |
+| Glob, Grep | **unavailable** |
+
+Web access working is what makes research fan-out worth delegating: a lane can search and read sources on the Codex budget instead of the Claude one. The missing Glob and Grep matter most for sweep-style work, so the generated lane prompts tell each lane to use Bash (`rg`, `find`) for discovery instead. If you brief a lane yourself, do the same, or hand it an explicit file list resolved on the Claude side.
+
+Worth knowing when you read a lane's self-report: an earlier audit marked WebSearch "failed" on evidence that was actually an account rate-limit message, and marked Glob failed because the agent looked for it via ToolSearch. Distinguish a tool that is absent from one that was blocked by something environmental — a lane will confidently conflate them.
+
 ### Known limitation: context windows
 
 Claude Code does not recognize `gpt-*` model ids, so it assumes a 200K context window for every lane and auto-compacts against that. The real windows are larger (spark is 256K, the 5.6 tier more), so long-context work is truncated earlier than it needs to be. Claude Code's own warning names the remedies — a `modelOverrides` settings entry, `CLAUDE_CODE_MAX_CONTEXT_TOKENS`, or a `[1m]` model-name suffix — but `CLAUDE_CODE_MAX_CONTEXT_TOKENS` is a single global value rather than a per-model map, so it cannot express four lanes with four different windows. Left unwired deliberately.
