@@ -159,6 +159,14 @@ const server = http.createServer((req, res) => {
     // body is fully buffered, so one retry on a fresh socket is safe and
     // invisible to the client.
     const RETRYABLE = new Set(['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ECONNREFUSED']);
+    // CLIProxyAPI answers 500/503 when the Codex upstream is overloaded, which several
+    // concurrent agents reliably provoke. Passed through, that kills a long agent run
+    // outright with no output. Retrying is safe only before any response byte reaches
+    // the client and only on the gpt leg: Anthropic sends its own retry-after and
+    // Claude Code already honours it, so retrying there would fight the client.
+    const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+    const MAX_ATTEMPTS = 3;
+    const backoffMs = (attempt) => 400 * attempt * attempt;
     const send = (attempt) => {
       const upstream = toCliproxy
         ? http.request({ host: CLIPROXY_HOST, port: CLIPROXY_PORT, path: req.url, method: req.method, headers, agent: attempt === 1 ? cliproxyAgent : false })
@@ -173,15 +181,28 @@ const server = http.createServer((req, res) => {
           res.end(JSON.stringify({ input_tokens }));
           return;
         }
-        log(`${route} ${req.method} ${req.url} model=${model ?? '-'} effort=${effort ?? '-'} status=${up.statusCode}${attempt > 1 ? ' (retry)' : ''}`);
+        if (
+          toCliproxy &&
+          RETRYABLE_STATUS.has(up.statusCode) &&
+          attempt < MAX_ATTEMPTS &&
+          !res.headersSent
+        ) {
+          up.resume();
+          const wait = backoffMs(attempt);
+          log(`RETRY ${route} ${req.method} ${req.url} model=${model ?? '-'} status=${up.statusCode} in ${wait}ms`);
+          setTimeout(() => send(attempt + 1), wait);
+          return;
+        }
+        log(`${route} ${req.method} ${req.url} model=${model ?? '-'} effort=${effort ?? '-'} status=${up.statusCode}${attempt > 1 ? ` (attempt ${attempt})` : ''}`);
         res.writeHead(up.statusCode, up.headers);
         up.pipe(res);
       });
       upstream.on('error', (err) => {
         const code = err.code || err.message;
-        if (attempt === 1 && !res.headersSent && RETRYABLE.has(err.code)) {
-          log(`RETRY ${route} ${req.method} ${req.url} ${code}`);
-          send(2);
+        if (attempt < MAX_ATTEMPTS && !res.headersSent && RETRYABLE.has(err.code)) {
+          const wait = backoffMs(attempt);
+          log(`RETRY ${route} ${req.method} ${req.url} ${code} in ${wait}ms`);
+          setTimeout(() => send(attempt + 1), wait);
           return;
         }
         log(`ERROR ${route} ${req.method} ${req.url} ${code}`);
